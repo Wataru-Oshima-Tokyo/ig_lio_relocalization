@@ -27,6 +27,13 @@ def generate_launch_description():
             output='screen',
             parameters=[param_path],  # Pass the parameter file path directly
         ),
+        # Node(
+        #     package='ig_lio_relocalization',
+        #     executable='ig_lio_tf_fusion_node',
+        #     name='ig_lio_tf_fusion_node',
+        #     output='screen',
+        #     parameters=[param_path],  # Pass the parameter file path directly
+        # ),
         Node(
             package='ig_lio',
             executable='ig_lio_node',

@@ -1,0 +1,4 @@
+/**:
+  ros__parameters:
+    map/load_map_path: /home/user/humble_ws/src/ig_lio/maps 
+    map/map_name: test 

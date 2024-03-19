@@ -6,7 +6,7 @@ import open3d as o3d
 import numpy as np
 from std_msgs.msg import Header
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
-from geometry_msgs.msg import TransformStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import TransformStamped, PoseWithCovarianceStamped,PoseStamped
 import tf_transformations
 import sensor_msgs_py.point_cloud2 as pc2
 import ros2_numpy as rnp
@@ -17,22 +17,24 @@ from nav_msgs.msg import Odometry
 import threading
 import time
 import signal
+import tf2_ros
+import tf2_geometry_msgs  # Don't forget to import this package for do_transform_pose
 
 class ICPNode(Node):
     def __init__(self):
         super().__init__('icp_node')
         self.MAP_VOXEL_SIZE = 0.4
-        self.SCAN_VOXEL_SIZE = 0.1
+        self.SCAN_VOXEL_SIZE = 1.0
         # Global localization frequency (HZ)
         self.FREQ_LOCALIZATION = 0.5
         # The threshold of global localization,
         # only those scan2map-matching with higher fitness than LOCALIZATION_TH will be taken
-        self.LOCALIZATION_TH = 0.70
+        self.LOCALIZATION_TH = 0.95
         # FOV(rad), modify this according to your LiDAR type
         self.FOV = 3.14
         
         # The farthest distance(meters) within FOV
-        self.FOV_FAR = 30
+        self.FOV_FAR = 50
 
         self.T_map_to_odom = np.eye(4)
 
@@ -63,6 +65,7 @@ class ICPNode(Node):
 
         #publishr ans subscriber
         self.pub_pc_in_map = self.create_publisher(PointCloud2,"/curr_pc_in_map",  1)
+        self.pub_map_to_odom_odometry = self.create_publisher(Odometry,"/map_to_odom",  1)
         self.pub_submap = self.create_publisher(PointCloud2,'/submap',  1)
         self.map_publisher_ = self.create_publisher(PointCloud2, 'map', 10)
         self.pose_subscription = self.create_subscription(
@@ -114,7 +117,7 @@ class ICPNode(Node):
         return pc
 
 
-    def pose_with_covariance_stamped_to_mat(self,pose_msg):
+    def pose_with_covariance_stamped_to_mat(self, pose_msg):
         """
         Convert a ROS PoseWithCovarianceStamped message to a 4x4 transformation matrix.
 
@@ -138,7 +141,7 @@ class ICPNode(Node):
         rotation_matrix = tf_transformations.quaternion_matrix(quaternion)
 
         # Combine the translation and rotation into a single transformation matrix
-        transformation_matrix = np.dot(translation_matrix, rotation_matrix)
+        transformation_matrix = np.matmul(translation_matrix, rotation_matrix)
 
         return transformation_matrix
 
@@ -150,7 +153,7 @@ class ICPNode(Node):
         translation_matrix = tf_transformations.translation_matrix(translation)
         rotation_matrix = tf_transformations.quaternion_matrix(quaternion)
 
-        return np.dot(translation_matrix, rotation_matrix)
+        return np.matmul(translation_matrix, rotation_matrix)
 
 
     def odom_to_mat(self, odom_msg):
@@ -173,9 +176,8 @@ class ICPNode(Node):
         # Create translation and rotation matrices
         translation_matrix = tf_transformations.translation_matrix(translation)
         rotation_matrix = tf_transformations.quaternion_matrix(quaternion)
-
         # Combine the translation and rotation into a single transformation matrix
-        transformation_matrix = np.dot(translation_matrix, rotation_matrix)
+        transformation_matrix = np.matmul(translation_matrix, rotation_matrix)
 
         return transformation_matrix
 
@@ -234,11 +236,12 @@ class ICPNode(Node):
 
     def crop_global_map_in_FOV(self, global_map, pose_estimation, cur_odom):
         # Convert the current odometry information to a transformation matrix
-        T_odom_to_base_link = self.odom_to_mat(cur_odom)
+        T_odom_mat = self.odom_to_mat(cur_odom)
         # Calculate the transformation matrix from the map frame to the base_link frame
         # This is achieved by multiplying the pose estimation matrix (map to odom)
         # with the transformation from odom to base_link
-        T_map_to_base_link = np.matmul(pose_estimation, T_odom_to_base_link)
+        # T_map_to_base_link = np.matmul(pose_estimation, T_odom_mat)
+        T_map_to_base_link = np.matmul(T_odom_mat, pose_estimation)
         # Invert the transformation matrix to get from base_link to map frame
         T_base_link_to_map = self.inverse_se3(T_map_to_base_link)
 
@@ -247,25 +250,31 @@ class ICPNode(Node):
         global_map_in_map = np.column_stack([global_map_in_map, np.ones(len(global_map_in_map))])
         
         # Transform the global map points from the map frame to the base_link frame
+
+
+        # global_map_in_base_link = np.matmul(T_base_link_to_map, global_map_in_map.T).T
         global_map_in_base_link = np.matmul(T_base_link_to_map, global_map_in_map.T).T
 
-        # Determine the indices of points within the specified Field Of View (FOV)
-        # Different conditions are used depending on the FOV angle
-        # if self.FOV > 3.14:  # If FOV is wider than half a circle
-        #     indices = np.where(
-        #         (global_map_in_base_link[:, 0] < self.FOV_FAR) &
-        #         (np.abs(np.arctan2(global_map_in_base_link[:, 1], global_map_in_base_link[:, 0])) < self.FOV / 2.0)
-        #     )
-        # else:  # For narrower FOVs
-        #     indices = np.where(
-        #         (global_map_in_base_link[:, 0] > 0) &
-        #         (global_map_in_base_link[:, 0] < self.FOV_FAR) &
-        #         (np.abs(np.arctan2(global_map_in_base_link[:, 1], global_map_in_base_link[:, 0])) < self.FOV/2.0)
-        #     )
+        # Calculate angles in radians of points relative to the robot's forward direction
+        angles = np.arctan2(global_map_in_base_link[:, 1], global_map_in_base_link[:, 0])
+
+        # Convert -60 to +60 degrees to radians for FOV
+        min_angle = np.radians(-60)
+        max_angle = np.radians(60)
+
+        # Filter points based on angle and distance (assuming self.FOV_FAR is defined)
+        # indices = np.where(
+        #     (global_map_in_base_link[:, 0] ** 2 + global_map_in_base_link[:, 1] ** 2 <= self.FOV_FAR ** 2) &
+        #     (angles >= min_angle) & (angles <= max_angle)
+        # )[0]
+
+        
         # Simplified condition for a 360-degree FOV
         indices = np.where(
             (global_map_in_base_link[:, 0] ** 2 + global_map_in_base_link[:, 1] ** 2) < self.FOV_FAR ** 2
         )
+
+
         # Create a new point cloud for the map points within the FOV
         global_map_in_FOV = o3d.geometry.PointCloud()
         # Extract only the XYZ coordinates (discard the homogeneous coordinate) of points within the FOV
@@ -306,25 +315,6 @@ class ICPNode(Node):
         return pcd
 
     def publish_point_cloud(self,publisher, header, points):
-    # Ensure 'pc' is a structured numpy array with the correct dtype
-        # dtype = [
-        #     ('x', np.float32),
-        #     ('y', np.float32),
-        #     ('z', np.float32),
-        # ]
-        # # Check if 'pc' includes intensity values to include them in the structured array
-        # if pc.shape[1] == 4:
-        #     dtype.append(('intensity', np.float32))
-        #     data = np.zeros(len(pc), dtype=dtype)
-        #     data['x'] = pc[:, 0]
-        #     data['y'] = pc[:, 1]
-        #     data['z'] = pc[:, 2]
-        #     data['intensity'] = pc[:, 3]
-        # else:
-        #     data = np.zeros(len(pc), dtype=dtype)
-        #     data['x'] = pc[:, 0]
-        #     data['y'] = pc[:, 1]
-        #     data['z'] = pc[:, 2]
         cloud_msg = pc2.create_cloud_xyz32(header, points)
         publisher.publish(cloud_msg)
 
@@ -341,6 +331,7 @@ class ICPNode(Node):
     def odom_callback(self,msg):
         self.current_odom = msg
 
+
     def initial_pose_callback(self, msg):
         self.initial_pose = self.pose_with_covariance_stamped_to_mat(msg)
         self.init_pose_received = True
@@ -356,9 +347,7 @@ class ICPNode(Node):
             self.get_logger().error('Error in keyframe_callback')
     # ------------------------------------------ #
 
-    def rotation_matrix_to_quaternion(self, rotation_matrix):
-        quaternion = tf_transformations.quaternion_from_matrix(rotation_matrix)
-        return quaternion
+
 
 
 
@@ -372,17 +361,24 @@ class ICPNode(Node):
             self.color_print.print_in_pink(f"Confidence: {fitness}")
             # 当全局定位成功时才更新map2odom
 
-            #debug ---------
-            self.broadcast_transform(self.T_map_to_odom)
-            return True
-            #-----------
-
-
-
-            if fitness > self.LOCALIZATION_TH:
-                # T_map_to_odom = np.matmul(transformation, pose_estimation)
+            if fitness > self.LOCALIZATION_TH or not self.init_pose_received:
                 self.T_map_to_odom = transformation
-                self.broadcast_transform(transformation)
+                map_to_odom = Odometry()
+                xyz = tf_transformations.translation_from_matrix(self.T_map_to_odom)
+                quat = tf_transformations.quaternion_from_matrix(self.T_map_to_odom)
+
+                # Fill the Odometry message
+                map_to_odom.pose.pose.position = Point(x=xyz[0], y=xyz[1], z=xyz[2])
+                map_to_odom.pose.pose.orientation = Quaternion(x=quat[0], y=quat[1], z=quat[2], w=quat[3])
+
+                # Assuming 'now' is the current time. In ROS2, get the current time using the node's clock
+                now = self.get_clock().now()
+                map_to_odom.header.stamp = now.to_msg()
+
+                map_to_odom.header.frame_id = 'map'
+
+                # Publish the map_to_odom transformation
+                self.pub_map_to_odom.publish(map_to_odom)
                 return True
             else:
                 self.color_print.print_in_yellow('Not match!!!!')
@@ -394,8 +390,9 @@ class ICPNode(Node):
 
     def localization(self):
         if self.location_initialized:
-            # self.global_localization(self.T_map_to_odom)
-            self.global_localization(self.initial_pose)
+            self.color_print.print_in_yellow(f"Calculating the transform {self.T_map_to_odom}")
+            self.global_localization(self.T_map_to_odom)
+            # self.global_localization(self.initial_pose)
 
     def wait_for_initpose(self):
         while not self.finished and not self.location_initialized:
@@ -406,32 +403,7 @@ class ICPNode(Node):
             time.sleep(0.5)
 
 
-    def broadcast_transform(self, transformation_matrix):
-        t = TransformStamped()
 
-        # Fill header information
-        t.header.stamp = self.get_clock().now().to_msg()
-        t.header.frame_id = 'map'
-        t.child_frame_id = 'odom'
-        
-        # Extract translation from the transformation matrix
-        t.transform.translation.x = transformation_matrix[0, 3]
-        t.transform.translation.y = transformation_matrix[1, 3]
-        t.transform.translation.z = transformation_matrix[2, 3]
-        
-        # Convert the rotation matrix to a quaternion
-        self.color_print.print_in_green("Transformation is: ")
-        self.color_print.print_in_green(transformation_matrix)
-        q = self.rotation_matrix_to_quaternion(transformation_matrix)
-        self.color_print.print_in_green("Done transforming q")
-        t.transform.rotation.x = q[0]
-        t.transform.rotation.y = q[1]
-        t.transform.rotation.z = q[2]
-        t.transform.rotation.w = q[3]
-        
-        # Broadcast the transformation
-        self.br.sendTransform(t)
-        # self.get_logger().info(f'Broadcasted map to odom transform with confidence {confidence}')
 
 def main(args=None):
     rclpy.init(args=args)

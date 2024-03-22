@@ -85,8 +85,8 @@ class TransformFusionNode(Node):
         t.transform.translation.z = transformation_matrix[2, 3]
         
         # Convert the rotation matrix to a quaternion
-        self.color_print.print_in_green("Transformation is: ")
-        self.color_print.print_in_green(transformation_matrix)
+        # self.color_print.print_in_green("Transformation is: ")
+        # self.color_print.print_in_green(transformation_matrix)
         q = self.rotation_matrix_to_quaternion(transformation_matrix)
         # self.color_print.print_in_green("Done transforming q")
         t.transform.rotation.x = q[0]

@@ -27,6 +27,7 @@ setup(
         'console_scripts': [
              'ig_lio_relocalization_node = ig_lio_relocalization.ig_lio_relocalize:main',
              'ig_lio_tf_fusion_node = ig_lio_relocalization.ig_lio_transform_fusion:main',
+             'visualization_test_node = ig_lio_relocalization.visualization_test:main',
         ],
     },
 )

@@ -6,7 +6,7 @@ import open3d as o3d
 import numpy as np
 from std_msgs.msg import Header
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
-from geometry_msgs.msg import TransformStamped, PoseWithCovarianceStamped,PoseStamped
+from geometry_msgs.msg import TransformStamped, PoseWithCovarianceStamped,PoseStamped, Point, Quaternion
 import tf_transformations
 import sensor_msgs_py.point_cloud2 as pc2
 import ros2_numpy as rnp
@@ -34,11 +34,12 @@ class ICPNode(Node):
         self.FOV = 3.14
         
         # The farthest distance(meters) within FOV
-        self.FOV_FAR = 50
+        self.FOV_FAR = 20
 
         self.T_map_to_odom = np.eye(4)
-
+        self.keyfram_timstamp = None
         self.finished = False
+        
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.color_print = COLOR_PRINT(self)
@@ -61,6 +62,25 @@ class ICPNode(Node):
         
         self.keyframe_pcd_ = None
 
+
+        # Create an instance of the Visualizer class
+        self.vis_for_gloabl = o3d.visualization.Visualizer()
+        self.vis_for_gloabl.create_window("Global map in fov", width=800, height=600)
+        self.debug_pcd_for_keyframe = o3d.geometry.PointCloud()
+        self.debug_pcd_for_gloabl_fov = o3d.geometry.PointCloud()
+        # self.vis_for_keyframe = o3d.visualization.Visualizer()
+        # self.vis_for_keyframe.create_window("Keyframe in fov", width=800, height=600)
+        self.initial_view = False
+        # Create an initial point cloud (can be empty or a placeholder)
+        # self.debug_pcd = o3d.geometry.PointCloud()
+        # self.debug_pcd.points = self.global_map.points
+        
+        # self.vis_for_gloabl.update_geometry(self.debug_pcd)
+        # self.vis_for_gloabl.poll_events()
+        # self.vis_for_gloabl.update_renderer()
+        # pcd.points = o3d.utility.Vector3dVector(np.random.rand(100, 3) - 0.5)  # Initialize with random points
+        
+        # self.vis_for_keyframe.add_geometry(pcd)
 
 
         #publishr ans subscriber
@@ -88,6 +108,7 @@ class ICPNode(Node):
             'keyframe_scan',
             self.keyframe_callback,
             10)
+
         self.keyframe_sub_  # prevent unused variable warning
         
         self.br = TransformBroadcaster(self)
@@ -212,7 +233,7 @@ class ICPNode(Node):
         
         # Estimate normals. The search parameter can be adjusted.
         # Here, we're using a radius that's 2x the voxel size for the neighborhood.
-        downsampled.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size*2, max_nn=30))
+        # downsampled.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size*2, max_nn=30))
         
         return downsampled
 
@@ -222,10 +243,19 @@ class ICPNode(Node):
             # Apply voxel downsampling and normal estimation to both point clouds
             pc_scan_down = self.preprocess_point_cloud(pc_scan, self.SCAN_VOXEL_SIZE*scale)
             pc_map_down = self.preprocess_point_cloud(pc_map, self.MAP_VOXEL_SIZE*scale)
+            self.debug_pcd_for_keyframe.points = pc_scan_down.points
+            self.debug_pcd_for_gloabl_fov.points = pc_map_down.points
+                
+
             # trans_init = np.eye(4)  # Initial transformation
+            # icp_result = o3d.pipelines.registration.registration_icp(
+            #     pc_scan_down, pc_map_down, 1.0*scale, trans_init,
+            #     o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+            #     o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50)
+            #     )
             icp_result = o3d.pipelines.registration.registration_icp(
                 pc_scan_down, pc_map_down, 1.0*scale, trans_init,
-                o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+                o3d.pipelines.registration.TransforationEstimationPointToPoint(),
                 o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50)
                 )
             return icp_result.transformation, icp_result.fitness
@@ -273,7 +303,21 @@ class ICPNode(Node):
         indices = np.where(
             (global_map_in_base_link[:, 0] ** 2 + global_map_in_base_link[:, 1] ** 2) < self.FOV_FAR ** 2
         )
-
+    # # 将视角内的地图点提取出来
+    #     if self.FOV > 3.14:
+    #         # 环状lidar 仅过滤距离
+    #         indices = np.where(
+    #             (global_map_in_base_link[:, 0] < self.FOV_FAR) &
+    #             (np.abs(np.arctan2(global_map_in_base_link[:, 1], global_map_in_base_link[:, 0])) < self.FOV / 2.0)
+    #         )
+    #     else:
+    #         # 非环状lidar 保前视范围
+    #         # FOV_FAR>x>0 且角度小于FOV
+    #         indices = np.where(
+    #             (global_map_in_base_link[:, 0] > 0) &
+    #             (global_map_in_base_link[:, 0] < self.FOV_FAR) &
+    #             (np.abs(np.arctan2(global_map_in_base_link[:, 1], global_map_in_base_link[:, 0])) < self.FOV / 2.0)
+    #         )
 
         # Create a new point cloud for the map points within the FOV
         global_map_in_FOV = o3d.geometry.PointCloud()
@@ -340,8 +384,10 @@ class ICPNode(Node):
     def keyframe_callback(self, msg):
         try:
             msg.header.frame_id = "map"
+            self.keyfram_timstamp = msg.header.stamp
             self.pub_pc_in_map.publish(msg)
             self.keyframe_pcd_ = self.convert_ros_pointcloud2_to_o3d(msg)
+            # self.debug_pcd.points = self.keyframe_pcd_.points
         except Exception as e:
             # self.get_logger().error('Error in keyframe_callback: {}'.format(str(e)))
             self.get_logger().error('Error in keyframe_callback')
@@ -349,19 +395,22 @@ class ICPNode(Node):
 
 
 
-
-
     def global_localization(self, pose_estimation):
         if self.current_odom is not None and self.keyframe_pcd_ is not None:
             self.color_print.print_in_blue("Start ICP")
-            global_map_in_FOV = self.crop_global_map_in_FOV(self.global_map, pose_estimation, self.current_odom)
-            tf_, _ = self.registration_at_scale(self.keyframe_pcd_, global_map_in_FOV, pose_estimation, 5)
-            transformation, fitness = self.registration_at_scale(self.keyframe_pcd_, global_map_in_FOV, tf_, 1)
-            
+            self.global_map_in_FOV = self.crop_global_map_in_FOV(self.global_map, pose_estimation, self.current_odom)
+            transformation, fitness = self.registration_at_scale(self.keyframe_pcd_, self.global_map_in_FOV , pose_estimation, 5)
+            # transformation, fitness = self.registration_at_scale(self.keyframe_pcd_, global_map_in_FOV, transformation, 1)
+
+            if not self.initial_view:
+                self.vis_for_gloabl.add_geometry(self.debug_pcd_for_gloabl_fov)
+                self.vis_for_gloabl.add_geometry(self.debug_pcd_for_keyframe)
+                self.initial_view = True
+
             self.color_print.print_in_pink(f"Confidence: {fitness}")
             # 当全局定位成功时才更新map2odom
 
-            if fitness > self.LOCALIZATION_TH or not self.init_pose_received:
+            if fitness > self.LOCALIZATION_TH or not self.location_initialized:
                 self.T_map_to_odom = transformation
                 map_to_odom = Odometry()
                 xyz = tf_transformations.translation_from_matrix(self.T_map_to_odom)
@@ -378,7 +427,7 @@ class ICPNode(Node):
                 map_to_odom.header.frame_id = 'map'
 
                 # Publish the map_to_odom transformation
-                self.pub_map_to_odom.publish(map_to_odom)
+                self.pub_map_to_odom_odometry.publish(map_to_odom)
                 return True
             else:
                 self.color_print.print_in_yellow('Not match!!!!')
@@ -393,14 +442,24 @@ class ICPNode(Node):
             self.color_print.print_in_yellow(f"Calculating the transform {self.T_map_to_odom}")
             self.global_localization(self.T_map_to_odom)
             # self.global_localization(self.initial_pose)
+        if self.initial_view:
+            self.color_print.print_in_pink(f"Showing the map")
+            self.vis_for_gloabl.update_geometry(self.debug_pcd_for_gloabl_fov)
+            self.vis_for_gloabl.poll_events()
+            self.vis_for_gloabl.update_renderer()
+            self.vis_for_gloabl.update_geometry(self.debug_pcd_for_keyframe)
+            self.vis_for_gloabl.poll_events()
+            self.vis_for_gloabl.update_renderer()
 
     def wait_for_initpose(self):
         while not self.finished and not self.location_initialized:
             if self.init_pose_received:
+                # Add the point cloud to the visualizer
                 self.location_initialized  = self.global_localization(self.initial_pose)
             else:
-                self.color_print.print_in_orange("Init pose isn not received")
+                self.color_print.print_in_orange("Init pose is not received")
             time.sleep(0.5)
+
 
 
 

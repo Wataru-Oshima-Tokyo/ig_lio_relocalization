@@ -23,8 +23,8 @@ import tf2_geometry_msgs  # Don't forget to import this package for do_transform
 class ICPNode(Node):
     def __init__(self):
         super().__init__('icp_node')
-        self.MAP_VOXEL_SIZE = 0.4
-        self.SCAN_VOXEL_SIZE = 1.0
+        self.MAP_VOXEL_SIZE = 0.5
+        self.SCAN_VOXEL_SIZE = 0.5
         # Global localization frequency (HZ)
         self.FREQ_LOCALIZATION = 0.5
         # The threshold of global localization,
@@ -34,7 +34,7 @@ class ICPNode(Node):
         self.FOV = 3.14
         
         # The farthest distance(meters) within FOV
-        self.FOV_FAR = 20
+        self.FOV_FAR = 100
 
         self.T_map_to_odom = np.eye(4)
         self.keyfram_timstamp = None
@@ -52,42 +52,34 @@ class ICPNode(Node):
         # Load map
         original_map_pcd = o3d.io.read_point_cloud(map_file_path)  # Update the path
         self.global_map = self.voxel_down_sample(original_map_pcd, self.MAP_VOXEL_SIZE)
-        
+        qos_profile = rclpy.qos.QoSProfile(depth=10)
+        qos_profile.durability = rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL
         # Convert Open3D PCD to PointCloud2
         self.map_header = Header()
         self.map_header.frame_id = "map"
-        timer_period = 1  # seconds (adjust as needed)
+        # timer_period = 1  # seconds (adjust as needed)
         self.color_print.print_in_blue(self.global_map)
-        self.pub_map_timer = self.create_timer(timer_period, self.pub_map_timer_callback)
+        
+        # self.pub_map_timer = self.create_timer(timer_period, self.pub_map_timer_callback)
         
         self.keyframe_pcd_ = None
 
 
         # Create an instance of the Visualizer class
-        self.vis_for_gloabl = o3d.visualization.Visualizer()
-        self.vis_for_gloabl.create_window("Global map in fov", width=800, height=600)
-        self.debug_pcd_for_keyframe = o3d.geometry.PointCloud()
-        self.debug_pcd_for_gloabl_fov = o3d.geometry.PointCloud()
-        # self.vis_for_keyframe = o3d.visualization.Visualizer()
-        # self.vis_for_keyframe.create_window("Keyframe in fov", width=800, height=600)
-        self.initial_view = False
-        # Create an initial point cloud (can be empty or a placeholder)
-        # self.debug_pcd = o3d.geometry.PointCloud()
-        # self.debug_pcd.points = self.global_map.points
-        
-        # self.vis_for_gloabl.update_geometry(self.debug_pcd)
-        # self.vis_for_gloabl.poll_events()
-        # self.vis_for_gloabl.update_renderer()
-        # pcd.points = o3d.utility.Vector3dVector(np.random.rand(100, 3) - 0.5)  # Initialize with random points
-        
-        # self.vis_for_keyframe.add_geometry(pcd)
+        # self.vis_for_gloabl = o3d.visualization.Visualizer()
+        # self.vis_for_gloabl.create_window("Global map in fov", width=800, height=600)
+        # self.debug_pcd_for_keyframe = o3d.geometry.PointCloud()
+        # self.debug_pcd_for_gloabl_fov = o3d.geometry.PointCloud()
+
+        # self.initial_view = False
+
 
 
         #publishr ans subscriber
         self.pub_pc_in_map = self.create_publisher(PointCloud2,"/curr_pc_in_map",  1)
         self.pub_map_to_odom_odometry = self.create_publisher(Odometry,"/map_to_odom",  1)
         self.pub_submap = self.create_publisher(PointCloud2,'/submap',  1)
-        self.map_publisher_ = self.create_publisher(PointCloud2, 'map', 10)
+        self.map_publisher_ = self.create_publisher(PointCloud2, 'map', qos_profile)
         self.pose_subscription = self.create_subscription(
             PoseWithCovarianceStamped,
             '/initialpose',
@@ -114,6 +106,8 @@ class ICPNode(Node):
         self.br = TransformBroadcaster(self)
         timer_period = 1.0 / 10  # seconds (10 Hz)
 
+        self.pub_map()
+
         self.location_initialized = False
         signal.signal(signal.SIGINT, self.sigint_handler)
         wait_for_initpose_thread = threading.Thread(target=self.wait_for_initpose)
@@ -137,6 +131,32 @@ class ICPNode(Node):
         pc[:, 2] = pc_array['z']
         return pc
 
+    def pose_with_covariance_stamped_to_mat_no_orientation(self, pose_msg):
+        """
+        Convert a ROS PoseWithCovarianceStamped message to a 4x4 transformation matrix without orientation.
+
+        Parameters:
+        - pose_msg: A geometry_msgs/msg/PoseWithCovarianceStamped message.
+
+        Returns:
+        - A 4x4 numpy array representing the transformation matrix with no orientation.
+        """
+        # Access the nested Pose object
+        pose = pose_msg.pose.pose
+
+        # Extract the position (x, y, z)
+        translation = [pose.position.x, pose.position.y, pose.position.z]
+
+        # Create a 4x4 transformation matrix with no orientation
+        # The matrix is initialized to an identity matrix
+        transformation_matrix = np.eye(4)
+
+        # Set the translation components
+        transformation_matrix[0, 3] = translation[0]
+        transformation_matrix[1, 3] = translation[1]
+        transformation_matrix[2, 3] = translation[2]
+
+        return transformation_matrix
 
     def pose_with_covariance_stamped_to_mat(self, pose_msg):
         """
@@ -233,7 +253,7 @@ class ICPNode(Node):
         
         # Estimate normals. The search parameter can be adjusted.
         # Here, we're using a radius that's 2x the voxel size for the neighborhood.
-        # downsampled.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size*2, max_nn=30))
+        downsampled.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size*2, max_nn=30))
         
         return downsampled
 
@@ -243,21 +263,13 @@ class ICPNode(Node):
             # Apply voxel downsampling and normal estimation to both point clouds
             pc_scan_down = self.preprocess_point_cloud(pc_scan, self.SCAN_VOXEL_SIZE*scale)
             pc_map_down = self.preprocess_point_cloud(pc_map, self.MAP_VOXEL_SIZE*scale)
-            self.debug_pcd_for_keyframe.points = pc_scan_down.points
-            self.debug_pcd_for_gloabl_fov.points = pc_map_down.points
-                
-
-            # trans_init = np.eye(4)  # Initial transformation
-            # icp_result = o3d.pipelines.registration.registration_icp(
-            #     pc_scan_down, pc_map_down, 1.0*scale, trans_init,
-            #     o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-            #     o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50)
-            #     )
-            icp_result = o3d.pipelines.registration.registration_icp(
+            # self.debug_pcd_for_keyframe.points = pc_scan_down.points
+            # self.debug_pcd_for_gloabl_fov.points = pc_map_down.points
+        
+            icp_result = o3d.pipelines.registration.registration_generalized_icp(
                 pc_scan_down, pc_map_down, 1.0*scale, trans_init,
-                o3d.pipelines.registration.TransforationEstimationPointToPoint(),
-                o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50)
-                )
+                o3d.pipelines.registration.TransformationEstimationForGeneralizedICP(),
+                o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50))
             return icp_result.transformation, icp_result.fitness
         except Exception as e:
             self.color_print.print_in_red(e)
@@ -270,8 +282,8 @@ class ICPNode(Node):
         # Calculate the transformation matrix from the map frame to the base_link frame
         # This is achieved by multiplying the pose estimation matrix (map to odom)
         # with the transformation from odom to base_link
-        # T_map_to_base_link = np.matmul(pose_estimation, T_odom_mat)
-        T_map_to_base_link = np.matmul(T_odom_mat, pose_estimation)
+        T_map_to_base_link = np.matmul(pose_estimation, T_odom_mat)
+        # T_map_to_base_link = np.matmul(T_odom_mat, pose_estimation)
         # Invert the transformation matrix to get from base_link to map frame
         T_base_link_to_map = self.inverse_se3(T_map_to_base_link)
 
@@ -300,24 +312,21 @@ class ICPNode(Node):
 
         
         # Simplified condition for a 360-degree FOV
-        indices = np.where(
-            (global_map_in_base_link[:, 0] ** 2 + global_map_in_base_link[:, 1] ** 2) < self.FOV_FAR ** 2
-        )
+
     # # 将视角内的地图点提取出来
-    #     if self.FOV > 3.14:
-    #         # 环状lidar 仅过滤距离
-    #         indices = np.where(
-    #             (global_map_in_base_link[:, 0] < self.FOV_FAR) &
-    #             (np.abs(np.arctan2(global_map_in_base_link[:, 1], global_map_in_base_link[:, 0])) < self.FOV / 2.0)
-    #         )
-    #     else:
-    #         # 非环状lidar 保前视范围
-    #         # FOV_FAR>x>0 且角度小于FOV
-    #         indices = np.where(
-    #             (global_map_in_base_link[:, 0] > 0) &
-    #             (global_map_in_base_link[:, 0] < self.FOV_FAR) &
-    #             (np.abs(np.arctan2(global_map_in_base_link[:, 1], global_map_in_base_link[:, 0])) < self.FOV / 2.0)
-    #         )
+        if self.FOV >= 3.14:
+            # 环状lidar 仅过滤距离
+            indices = np.where(
+                (global_map_in_base_link[:, 0] ** 2 + global_map_in_base_link[:, 1] ** 2) < self.FOV_FAR ** 2
+            )
+        else:
+            # 非环状lidar 保前视范围
+            # FOV_FAR>x>0 且角度小于FOV
+            indices = np.where(
+                (global_map_in_base_link[:, 0] > 0) &
+                (global_map_in_base_link[:, 0] < self.FOV_FAR) &
+                (np.abs(np.arctan2(global_map_in_base_link[:, 1], global_map_in_base_link[:, 0])) < self.FOV / 2.0)
+            )
 
         # Create a new point cloud for the map points within the FOV
         global_map_in_FOV = o3d.geometry.PointCloud()
@@ -365,7 +374,7 @@ class ICPNode(Node):
     # ------------------------------------------ #
 
     # ------- callbacks ------------------- #
-    def pub_map_timer_callback(self):
+    def pub_map(self):
         self.map_header.stamp = self.get_clock().now().to_msg()  # Current time
         points = np.asarray(self.global_map.points)
         cloud_msg = pc2.create_cloud_xyz32(self.map_header, points)
@@ -378,6 +387,8 @@ class ICPNode(Node):
 
     def initial_pose_callback(self, msg):
         self.initial_pose = self.pose_with_covariance_stamped_to_mat(msg)
+        # self.initial_pose = self.pose_with_covariance_stamped_to_mat_no_orientation(msg)
+        self.publish_map_odom(self.initial_pose)
         self.init_pose_received = True
         self.color_print.print_in_green('Initial pose received.')
 
@@ -385,7 +396,7 @@ class ICPNode(Node):
         try:
             msg.header.frame_id = "map"
             self.keyfram_timstamp = msg.header.stamp
-            self.pub_pc_in_map.publish(msg)
+            # self.pub_pc_in_map.publish(msg)
             self.keyframe_pcd_ = self.convert_ros_pointcloud2_to_o3d(msg)
             # self.debug_pcd.points = self.keyframe_pcd_.points
         except Exception as e:
@@ -399,57 +410,64 @@ class ICPNode(Node):
         if self.current_odom is not None and self.keyframe_pcd_ is not None:
             self.color_print.print_in_blue("Start ICP")
             self.global_map_in_FOV = self.crop_global_map_in_FOV(self.global_map, pose_estimation, self.current_odom)
-            transformation, fitness = self.registration_at_scale(self.keyframe_pcd_, self.global_map_in_FOV , pose_estimation, 5)
-            # transformation, fitness = self.registration_at_scale(self.keyframe_pcd_, global_map_in_FOV, transformation, 1)
+            rough_transformation, rough_fitness = self.registration_at_scale(self.keyframe_pcd_, self.global_map_in_FOV , pose_estimation, 10)
+            self.color_print.print_in_orange(f"rough_fitness: {rough_fitness}")
+            transformation, fitness = self.registration_at_scale(self.keyframe_pcd_, self.global_map_in_FOV, rough_transformation, 1)
+            
+            # if not self.initial_view:
+            #     self.vis_for_gloabl.add_geometry(self.debug_pcd_for_gloabl_fov)
+            #     self.vis_for_gloabl.add_geometry(self.debug_pcd_for_keyframe)
+            #     self.initial_view = True
 
-            if not self.initial_view:
-                self.vis_for_gloabl.add_geometry(self.debug_pcd_for_gloabl_fov)
-                self.vis_for_gloabl.add_geometry(self.debug_pcd_for_keyframe)
-                self.initial_view = True
-
-            self.color_print.print_in_pink(f"Confidence: {fitness}")
+            
             # 当全局定位成功时才更新map2odom
 
-            if fitness > self.LOCALIZATION_TH or not self.location_initialized:
+            if fitness > self.LOCALIZATION_TH:
+                self.color_print.print_in_green('Matched!!!')
+                self.color_print.print_in_pink(f"fitness: {fitness}")
                 self.T_map_to_odom = transformation
-                map_to_odom = Odometry()
-                xyz = tf_transformations.translation_from_matrix(self.T_map_to_odom)
-                quat = tf_transformations.quaternion_from_matrix(self.T_map_to_odom)
-
-                # Fill the Odometry message
-                map_to_odom.pose.pose.position = Point(x=xyz[0], y=xyz[1], z=xyz[2])
-                map_to_odom.pose.pose.orientation = Quaternion(x=quat[0], y=quat[1], z=quat[2], w=quat[3])
-
-                # Assuming 'now' is the current time. In ROS2, get the current time using the node's clock
-                now = self.get_clock().now()
-                map_to_odom.header.stamp = now.to_msg()
-
-                map_to_odom.header.frame_id = 'map'
-
-                # Publish the map_to_odom transformation
-                self.pub_map_to_odom_odometry.publish(map_to_odom)
+                self.publish_map_odom(self.T_map_to_odom)
                 return True
             else:
-                self.color_print.print_in_yellow('Not match!!!!')
+                self.color_print.print_in_yellow('Not match...')
                 self.color_print.print_in_yellow('fitness score:{}'.format(fitness))
                 return False
         self.color_print.print_in_yellow("Not received odom or keyframe yet")
         return False
 
+    def publish_map_odom(self, transformation44):
+        map_to_odom = Odometry()
+        xyz = tf_transformations.translation_from_matrix(transformation44)
+        quat = tf_transformations.quaternion_from_matrix(transformation44)
+        # xyz = tf_transformations.translation_from_matrix(pose_estimation)
+        # quat = tf_transformations.quaternion_from_matrix(pose_estimation)
+
+        # Fill the Odometry message
+        map_to_odom.pose.pose.position = Point(x=xyz[0], y=xyz[1], z=xyz[2])
+        map_to_odom.pose.pose.orientation = Quaternion(x=quat[0], y=quat[1], z=quat[2], w=quat[3])
+
+        # Assuming 'now' is the current time. In ROS2, get the current time using the node's clock
+        now = self.get_clock().now()
+        map_to_odom.header.stamp = now.to_msg()
+
+        map_to_odom.header.frame_id = 'map'
+
+        # Publish the map_to_odom transformation
+        self.pub_map_to_odom_odometry.publish(map_to_odom)
 
     def localization(self):
         if self.location_initialized:
             self.color_print.print_in_yellow(f"Calculating the transform {self.T_map_to_odom}")
             self.global_localization(self.T_map_to_odom)
             # self.global_localization(self.initial_pose)
-        if self.initial_view:
-            self.color_print.print_in_pink(f"Showing the map")
-            self.vis_for_gloabl.update_geometry(self.debug_pcd_for_gloabl_fov)
-            self.vis_for_gloabl.poll_events()
-            self.vis_for_gloabl.update_renderer()
-            self.vis_for_gloabl.update_geometry(self.debug_pcd_for_keyframe)
-            self.vis_for_gloabl.poll_events()
-            self.vis_for_gloabl.update_renderer()
+        # if self.initial_view:
+        #     self.color_print.print_in_pink(f"Showing the map")
+        #     self.vis_for_gloabl.update_geometry(self.debug_pcd_for_gloabl_fov)
+        #     self.vis_for_gloabl.poll_events()
+        #     self.vis_for_gloabl.update_renderer()
+        #     self.vis_for_gloabl.update_geometry(self.debug_pcd_for_keyframe)
+        #     self.vis_for_gloabl.poll_events()
+        #     self.vis_for_gloabl.update_renderer()
 
     def wait_for_initpose(self):
         while not self.finished and not self.location_initialized:

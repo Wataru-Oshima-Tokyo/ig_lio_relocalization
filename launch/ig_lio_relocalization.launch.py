@@ -47,13 +47,13 @@ def generate_launch_description():
         #     name='submap2velodyne_node',
         #     output='screen',
         # ),
-        Node(
-            package='ig_lio',
-            executable='ig_lio_node',
-            name='ig_lio_node',
-            output='screen',
-            parameters=[param_path],  # Pass the parameter file path directly
-        ),
+        # Node(
+        #     package='ig_lio',
+        #     executable='ig_lio_node',
+        #     name='ig_lio_node',
+        #     output='screen',
+        #     parameters=[param_path],  # Pass the parameter file path directly
+        # ),
         Node(
             package='rviz2',
             executable='rviz2',

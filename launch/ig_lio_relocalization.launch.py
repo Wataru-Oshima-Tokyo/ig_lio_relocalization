@@ -18,6 +18,7 @@ def generate_launch_description():
     
     # Define the path to your parameter file
     param_path = os.path.join(ig_lio_dir, 'config', 'velodyne.yaml')
+    reloc_param_path = os.path.join(ig_lio_reloc_dir, 'params', 'reloc.yaml')
 
     return LaunchDescription([
         Node(
@@ -25,35 +26,22 @@ def generate_launch_description():
             executable='ig_lio_relocalization_node',
             name='ig_lio_relocalization_node',
             output='screen',
-            parameters=[param_path],  # Pass the parameter file path directly
+            parameters=[reloc_param_path],  # Pass the parameter file path directly
         ),
         Node(
             package='ig_lio_relocalization',
             executable='ig_lio_tf_fusion_node',
             name='ig_lio_tf_fusion_node',
             output='screen',
+            # parameters=[param_path],  # Pass the parameter file path directly
+        ),
+        Node(
+            package='ig_lio',
+            executable='ig_lio_node',
+            name='ig_lio_node',
+            output='screen',
             parameters=[param_path],  # Pass the parameter file path directly
         ),
-        # Node(
-        #     package='ig_lio',
-        #     executable='ig_lio_keyframe_node',
-        #     name='ig_lio_keyframe_node',
-        #     output='screen',
-        #     # parameters=[param_path],  # Pass the parameter file path directly
-        # ),
-        # Node(
-        #     package='pointcloud_handler',
-        #     executable='submap2velodyne',
-        #     name='submap2velodyne_node',
-        #     output='screen',
-        # ),
-        # Node(
-        #     package='ig_lio',
-        #     executable='ig_lio_node',
-        #     name='ig_lio_node',
-        #     output='screen',
-        #     parameters=[param_path],  # Pass the parameter file path directly
-        # ),
         Node(
             package='rviz2',
             executable='rviz2',

@@ -23,60 +23,68 @@ import tf2_geometry_msgs  # Don't forget to import this package for do_transform
 class ICPNode(Node):
     def __init__(self):
         super().__init__('icp_node')
-        self.MAP_VOXEL_SIZE = 0.5
-        self.SCAN_VOXEL_SIZE = 0.5
-        # Global localization frequency (HZ)
-        self.FREQ_LOCALIZATION = 0.5
-        # The threshold of global localization,
-        # only those scan2map-matching with higher fitness than LOCALIZATION_TH will be taken
-        self.LOCALIZATION_TH = 0.95
-        # FOV(rad), modify this according to your LiDAR type
-        self.FOV = 3.14
-        
-        # The farthest distance(meters) within FOV
-        self.FOV_FAR = 100
+        self.initialize_variables()
+        self.declare_params()
+        self.get_params()
+        self.set_pubsub()
+        self.color_print.print_in_purple("ICP node started!")
+        self.color_print.print_in_blue(self.global_map)
+        timer_period = 1.0 / 10  # seconds (10 Hz)
+        self.pub_map()
+        signal.signal(signal.SIGINT, self.sigint_handler)
+        wait_for_initpose_thread = threading.Thread(target=self.wait_for_initpose)
+        wait_for_initpose_thread.start()
+        self.localization_timer = self.create_timer(1/self.FREQ_LOCALIZATION, self.localization)
 
+    def initialize_variables(self):
         self.T_map_to_odom = np.eye(4)
         self.keyfram_timstamp = None
         self.finished = False
-        
+        self.keyframe_pcd_ = None
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.color_print = COLOR_PRINT(self)
-        self.color_print.print_in_purple("ICP node started!")
+        self.current_odom = None
+        self.location_initialized = False
+        self.br = TransformBroadcaster(self)
+        self.map_header = Header()
+        self.map_header.frame_id = "map"
+
+
+
+    def declare_params(self):
         self.declare_parameter('map/map_location', '/')
         self.declare_parameter('map/map_name', 'test')
-        map_location_ = self.get_parameter('map/map_location').get_parameter_value().string_value      
-        map_name_ = self.get_parameter('map/map_name').get_parameter_value().string_value      
+        self.declare_parameter("icp/map_voxel_size",0.5)
+        self.declare_parameter("icp/scan_voxel_size",0.5)
+        self.declare_parameter("icp/freq_localization",0.5)
+        self.declare_parameter("icp/localization_threshold",0.95)
+        self.declare_parameter("icp/field_of_view",3.14)
+        self.declare_parameter("icp/field_of_view_far",100)
+        self.declare_parameter('icp/initialpose_iteration', 20)
+        self.declare_parameter('icp/executing_iteration', 10)
+
+    def get_params(self):
+        self.MAP_VOXEL_SIZE =             self.get_parameter("icp/map_voxel_size").get_parameter_value().double_value
+        self.SCAN_VOXEL_SIZE =            self.get_parameter("icp/scan_voxel_size").get_parameter_value().double_value
+        self.FREQ_LOCALIZATION =          self.get_parameter("icp/freq_localization").get_parameter_value().double_value
+        self.LOCALIZATION_TH =            self.get_parameter("icp/localization_threshold").get_parameter_value().double_value
+        self.FOV =                        self.get_parameter("icp/field_of_view").get_parameter_value().double_value
+        self.FOV_FAR =                    self.get_parameter("icp/field_of_view_far").get_parameter_value().integer_value
+        self.initialpose_iteration =      self.get_parameter('icp/initialpose_iteration').get_parameter_value().integer_value      
+        self.executing_iteration =        self.get_parameter('icp/executing_iteration').get_parameter_value().integer_value
+        map_location_ =                   self.get_parameter('map/map_location').get_parameter_value().string_value      
+        map_name_ =                       self.get_parameter('map/map_name').get_parameter_value().string_value      
         map_file_path = map_location_ + "/"+ map_name_ + ".pcd"
+        self.color_print.print_in_blue(map_file_path)
+      
         # Load map
         original_map_pcd = o3d.io.read_point_cloud(map_file_path)  # Update the path
         self.global_map = self.voxel_down_sample(original_map_pcd, self.MAP_VOXEL_SIZE)
+    
+    def set_pubsub(self):
         qos_profile = rclpy.qos.QoSProfile(depth=10)
         qos_profile.durability = rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL
-        # Convert Open3D PCD to PointCloud2
-        self.map_header = Header()
-        self.map_header.frame_id = "map"
-        # timer_period = 1  # seconds (adjust as needed)
-        self.color_print.print_in_blue(self.global_map)
-        
-        # self.pub_map_timer = self.create_timer(timer_period, self.pub_map_timer_callback)
-        
-        self.keyframe_pcd_ = None
-
-
-        # Create an instance of the Visualizer class
-        # self.vis_for_gloabl = o3d.visualization.Visualizer()
-        # self.vis_for_gloabl.create_window("Global map in fov", width=800, height=600)
-        # self.debug_pcd_for_keyframe = o3d.geometry.PointCloud()
-        # self.debug_pcd_for_gloabl_fov = o3d.geometry.PointCloud()
-
-        # self.initial_view = False
-
-
-
-        #publishr ans subscriber
-        self.pub_pc_in_map = self.create_publisher(PointCloud2,"/curr_pc_in_map",  1)
         self.pub_map_to_odom_odometry = self.create_publisher(Odometry,"/map_to_odom",  1)
         self.pub_submap = self.create_publisher(PointCloud2,'/submap',  1)
         self.map_publisher_ = self.create_publisher(PointCloud2, 'map', qos_profile)
@@ -101,20 +109,6 @@ class ICPNode(Node):
             self.keyframe_callback,
             10)
 
-        self.keyframe_sub_  # prevent unused variable warning
-        
-        self.br = TransformBroadcaster(self)
-        timer_period = 1.0 / 10  # seconds (10 Hz)
-
-        self.pub_map()
-
-        self.location_initialized = False
-        signal.signal(signal.SIGINT, self.sigint_handler)
-        wait_for_initpose_thread = threading.Thread(target=self.wait_for_initpose)
-        wait_for_initpose_thread.start()
-        self.localization_timer = self.create_timer(1/self.FREQ_LOCALIZATION, self.localization)
-        self.current_odom = None
-        # self.reloc_timer = self.create_timer(timer_period, self.prepar)
 
 
     def sigint_handler(self, signal_received, frame):
@@ -263,13 +257,16 @@ class ICPNode(Node):
             # Apply voxel downsampling and normal estimation to both point clouds
             pc_scan_down = self.preprocess_point_cloud(pc_scan, self.SCAN_VOXEL_SIZE*scale)
             pc_map_down = self.preprocess_point_cloud(pc_map, self.MAP_VOXEL_SIZE*scale)
-            # self.debug_pcd_for_keyframe.points = pc_scan_down.points
-            # self.debug_pcd_for_gloabl_fov.points = pc_map_down.points
-        
+            self.color_print.print_in_yellow(f"scan {pc_scan_down}")
+            self.color_print.print_in_yellow(f"map {pc_map_down}")
+            if self.location_initialized:
+                max_iteration_ = self.initialpose_iteration
+            else:
+                max_iteration_ = self.executing_iteration
             icp_result = o3d.pipelines.registration.registration_generalized_icp(
                 pc_scan_down, pc_map_down, 1.0*scale, trans_init,
                 o3d.pipelines.registration.TransformationEstimationForGeneralizedICP(),
-                o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50))
+                o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=max_iteration_))
             return icp_result.transformation, icp_result.fitness
         except Exception as e:
             self.color_print.print_in_red(e)
@@ -283,7 +280,6 @@ class ICPNode(Node):
         # This is achieved by multiplying the pose estimation matrix (map to odom)
         # with the transformation from odom to base_link
         T_map_to_base_link = np.matmul(pose_estimation, T_odom_mat)
-        # T_map_to_base_link = np.matmul(T_odom_mat, pose_estimation)
         # Invert the transformation matrix to get from base_link to map frame
         T_base_link_to_map = self.inverse_se3(T_map_to_base_link)
 
@@ -292,36 +288,15 @@ class ICPNode(Node):
         global_map_in_map = np.column_stack([global_map_in_map, np.ones(len(global_map_in_map))])
         
         # Transform the global map points from the map frame to the base_link frame
-
-
-        # global_map_in_base_link = np.matmul(T_base_link_to_map, global_map_in_map.T).T
         global_map_in_base_link = np.matmul(T_base_link_to_map, global_map_in_map.T).T
 
-        # Calculate angles in radians of points relative to the robot's forward direction
-        angles = np.arctan2(global_map_in_base_link[:, 1], global_map_in_base_link[:, 0])
 
-        # Convert -60 to +60 degrees to radians for FOV
-        min_angle = np.radians(-60)
-        max_angle = np.radians(60)
-
-        # Filter points based on angle and distance (assuming self.FOV_FAR is defined)
-        # indices = np.where(
-        #     (global_map_in_base_link[:, 0] ** 2 + global_map_in_base_link[:, 1] ** 2 <= self.FOV_FAR ** 2) &
-        #     (angles >= min_angle) & (angles <= max_angle)
-        # )[0]
-
-        
-        # Simplified condition for a 360-degree FOV
-
-    # # 将视角内的地图点提取出来
         if self.FOV >= 3.14:
-            # 环状lidar 仅过滤距离
+            # Simplified condition for a 360-degree FOV
             indices = np.where(
                 (global_map_in_base_link[:, 0] ** 2 + global_map_in_base_link[:, 1] ** 2) < self.FOV_FAR ** 2
             )
         else:
-            # 非环状lidar 保前视范围
-            # FOV_FAR>x>0 且角度小于FOV
             indices = np.where(
                 (global_map_in_base_link[:, 0] > 0) &
                 (global_map_in_base_link[:, 0] < self.FOV_FAR) &
@@ -379,7 +354,6 @@ class ICPNode(Node):
         points = np.asarray(self.global_map.points)
         cloud_msg = pc2.create_cloud_xyz32(self.map_header, points)
         self.map_publisher_.publish(cloud_msg)
-        # self.get_logger().info('Publishing transformed PCD as PointCloud2')
 
     def odom_callback(self,msg):
         self.current_odom = msg
@@ -387,7 +361,6 @@ class ICPNode(Node):
 
     def initial_pose_callback(self, msg):
         self.initial_pose = self.pose_with_covariance_stamped_to_mat(msg)
-        # self.initial_pose = self.pose_with_covariance_stamped_to_mat_no_orientation(msg)
         self.publish_map_odom(self.initial_pose)
         self.init_pose_received = True
         self.color_print.print_in_green('Initial pose received.')
@@ -396,11 +369,8 @@ class ICPNode(Node):
         try:
             msg.header.frame_id = "map"
             self.keyfram_timstamp = msg.header.stamp
-            # self.pub_pc_in_map.publish(msg)
             self.keyframe_pcd_ = self.convert_ros_pointcloud2_to_o3d(msg)
-            # self.debug_pcd.points = self.keyframe_pcd_.points
         except Exception as e:
-            # self.get_logger().error('Error in keyframe_callback: {}'.format(str(e)))
             self.get_logger().error('Error in keyframe_callback')
     # ------------------------------------------ #
 
@@ -410,17 +380,10 @@ class ICPNode(Node):
         if self.current_odom is not None and self.keyframe_pcd_ is not None:
             self.color_print.print_in_blue("Start ICP")
             self.global_map_in_FOV = self.crop_global_map_in_FOV(self.global_map, pose_estimation, self.current_odom)
-            rough_transformation, rough_fitness = self.registration_at_scale(self.keyframe_pcd_, self.global_map_in_FOV , pose_estimation, 10)
+            rough_transformation, rough_fitness = self.registration_at_scale(self.keyframe_pcd_, self.global_map_in_FOV , pose_estimation, 5)
             self.color_print.print_in_orange(f"rough_fitness: {rough_fitness}")
             transformation, fitness = self.registration_at_scale(self.keyframe_pcd_, self.global_map_in_FOV, rough_transformation, 1)
             
-            # if not self.initial_view:
-            #     self.vis_for_gloabl.add_geometry(self.debug_pcd_for_gloabl_fov)
-            #     self.vis_for_gloabl.add_geometry(self.debug_pcd_for_keyframe)
-            #     self.initial_view = True
-
-            
-            # 当全局定位成功时才更新map2odom
 
             if fitness > self.LOCALIZATION_TH:
                 self.color_print.print_in_green('Matched!!!')
@@ -439,8 +402,7 @@ class ICPNode(Node):
         map_to_odom = Odometry()
         xyz = tf_transformations.translation_from_matrix(transformation44)
         quat = tf_transformations.quaternion_from_matrix(transformation44)
-        # xyz = tf_transformations.translation_from_matrix(pose_estimation)
-        # quat = tf_transformations.quaternion_from_matrix(pose_estimation)
+
 
         # Fill the Odometry message
         map_to_odom.pose.pose.position = Point(x=xyz[0], y=xyz[1], z=xyz[2])
@@ -459,15 +421,6 @@ class ICPNode(Node):
         if self.location_initialized:
             self.color_print.print_in_yellow(f"Calculating the transform {self.T_map_to_odom}")
             self.global_localization(self.T_map_to_odom)
-            # self.global_localization(self.initial_pose)
-        # if self.initial_view:
-        #     self.color_print.print_in_pink(f"Showing the map")
-        #     self.vis_for_gloabl.update_geometry(self.debug_pcd_for_gloabl_fov)
-        #     self.vis_for_gloabl.poll_events()
-        #     self.vis_for_gloabl.update_renderer()
-        #     self.vis_for_gloabl.update_geometry(self.debug_pcd_for_keyframe)
-        #     self.vis_for_gloabl.poll_events()
-        #     self.vis_for_gloabl.update_renderer()
 
     def wait_for_initpose(self):
         while not self.finished and not self.location_initialized:

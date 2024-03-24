@@ -1,4 +1,14 @@
 /**:
   ros__parameters:
-    map/load_map_path: /home/user/humble_ws/src/ig_lio/maps 
-    map/map_name: test 
+    map/map_location: /home/user/humble_ws/src/ig_lio/maps 
+    map/map_name: test2 
+
+    icp/map_voxel_size: 0.5
+    icp/scan_voxel_size: 0.5
+    icp/freq_localization: 0.1  #hz
+    icp/localization_threshold: 0.95
+    icp/field_of_view: 3.14
+    icp/field_of_view_far: 100
+    icp/initialpose_iteration: 50
+    icp/executing_iteration: 20
+
